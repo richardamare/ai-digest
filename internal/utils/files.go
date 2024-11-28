@@ -10,6 +10,7 @@ import (
 
 // BinaryFileTypes maps extensions to their file types
 var BinaryFileTypes = map[string]string{
+	".ico":   "Icon",
 	".jpg":   "Image",
 	".jpeg":  "Image",
 	".png":   "Image",
