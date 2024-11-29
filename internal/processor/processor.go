@@ -490,13 +490,24 @@ func (p *Processor) processTextFile(path string) (string, error) {
 		contentStr = utils.RemoveWhitespace(contentStr)
 	}
 
-	contentStr = utils.EscapeTripleBackticks(contentStr)
+	relPath, err := filepath.Rel(p.config.InputDir, path)
+	if err != nil {
+		return "", fmt.Errorf("failed to get relative path: %w", err)
+	}
 
 	var buf strings.Builder
-	fmt.Fprintf(&buf, "# %s\n\n```%s\n%s\n```\n\n",
-		filepath.Base(path),
-		strings.TrimPrefix(ext, "."),
-		contentStr)
+	fmt.Fprintf(&buf, "# %s\n\n", relPath)
+
+	// For markdown files, use four backticks to wrap content
+	if ext == ".md" || ext == ".markdown" {
+		buf.WriteString("````md\n")
+		buf.WriteString(contentStr)
+		buf.WriteString("\n````\n\n")
+	} else {
+		fmt.Fprintf(&buf, "```%s\n%s\n```\n\n",
+			strings.TrimPrefix(ext, "."),
+			contentStr)
+	}
 
 	return buf.String(), nil
 }
