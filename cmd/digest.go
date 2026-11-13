@@ -1,127 +1,92 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
-	"github.com/richardamare/ai-digest/internal/processor"
+	"github.com/richardamare/ai-digest/internal/core"
+	"github.com/richardamare/ai-digest/internal/format"
+	"github.com/richardamare/ai-digest/internal/walker"
 	"github.com/spf13/cobra"
-)
-
-var (
-	// Command flags
-	inputDir          string
-	outputFile        string
-	useDefaultIgnores bool
-	removeWhitespace  bool
-	showOutputFiles   bool
-	ignoreFile        string
-	splitOutput       bool
-	maxFileSizeMB     int
-	outputPattern     string
-	chunkSize         int
 )
 
 var digestCmd = &cobra.Command{
 	Use:   "digest",
 	Short: "Create a digest of your codebase",
-	Long: `Digest creates a digest of your codebase in single or multiple markdown files.
-It handles text and binary files, respects ignore patterns, and provides various formatting options.
+	Long: `Digest creates a markdown digest of your codebase.
+It handles text and binary files, respects gitignore patterns,
+and provides various formatting options.
 
 Examples:
   ai-digest digest -i /path/to/project -o output.md
-  ai-digest digest -i /path/to/project -o output.md --split --max-size 5
-  ai-digest digest -i /path/to/project -o output.md --split --output-pattern "part_%d.md"`,
-	RunE:    runDigest,
-	PreRunE: validateFlags,
-}
-
-func init() {
-	// Required flags
-	digestCmd.Flags().StringVarP(&inputDir, "input", "i", ".",
-		"Input directory containing the codebase")
-	digestCmd.Flags().StringVarP(&outputFile, "output", "o", "codebase.md",
-		"Output markdown file path")
-
-	// Optional flags
-	digestCmd.Flags().BoolVar(&useDefaultIgnores, "no-default-ignores", true,
-		"Disable default ignore patterns")
-	digestCmd.Flags().BoolVar(&removeWhitespace, "whitespace-removal", false,
-		"Enable whitespace removal for non-sensitive files")
-	digestCmd.Flags().BoolVar(&showOutputFiles, "show-output-files", false,
-		"Display a list of files included in the output")
-	digestCmd.Flags().StringVar(&ignoreFile, "ignore-file", ".aidigestignore",
-		"Custom ignore file name")
-
-	// Split-specific flags
-	digestCmd.Flags().BoolVar(&splitOutput, "split", false,
-		"Split output into multiple files")
-	digestCmd.Flags().IntVar(&maxFileSizeMB, "max-size", 10,
-		"Maximum size of each output file in MB (only used with --split)")
-	digestCmd.Flags().StringVar(&outputPattern, "output-pattern", "",
-		"Pattern for split output files (e.g., 'part_%d.md')")
-	digestCmd.Flags().IntVar(&chunkSize, "chunk-size", 1,
-		"Size of processing chunks in MB")
-
-	rootCmd.AddCommand(digestCmd)
-}
-
-func validateFlags(cmd *cobra.Command, args []string) error {
-	// Validate input directory
-	if _, err := os.Stat(inputDir); os.IsNotExist(err) {
-		return fmt.Errorf("input directory does not exist: %s", inputDir)
-	}
-
-	// Validate and create output directory
-	outputDir := filepath.Dir(outputFile)
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return fmt.Errorf("failed to create output directory: %w", err)
-	}
-
-	// Validate max file size
-	if maxFileSizeMB <= 0 {
-		return fmt.Errorf("max-size must be greater than 0")
-	}
-
-	// Validate chunk size
-	if chunkSize <= 0 {
-		return fmt.Errorf("chunk-size must be greater than 0")
-	}
-
-	// Validate output pattern if provided
-	if splitOutput && outputPattern != "" {
-		_ = fmt.Sprintf(outputPattern, 1)
-	}
-
-	return nil
+  ai-digest digest -i /path/to/project --preserve-ws`,
+	RunE: runDigest,
 }
 
 func runDigest(cmd *cobra.Command, args []string) error {
-	// Create processor configuration
-	config := processor.ProcessorConfig{
-		InputDir:          inputDir,
-		OutputFile:        outputFile,
-		UseDefaultIgnores: useDefaultIgnores,
-		RemoveWhitespace:  removeWhitespace,
-		ShowOutputFiles:   showOutputFiles,
-		IgnoreFile:        ignoreFile,
-		Split:             splitOutput,
-		MaxFileSizeMB:     maxFileSizeMB,
-		OutputFilePattern: outputPattern,
-		ChunkSize:         chunkSize * 1024 * 1024, // Convert to bytes
-	}
-
-	// Create processor instance
-	proc, err := processor.NewProcessor(config)
+	// Resolve absolute paths
+	absInputDir, err := filepath.Abs(inputDir)
 	if err != nil {
-		return fmt.Errorf("failed to create processor: %w", err)
+		return fmt.Errorf("invalid input directory: %w", err)
 	}
 
-	// Process the codebase
-	if err := proc.Process(); err != nil {
-		return fmt.Errorf("processing failed: %w", err)
+	absOutputFile, err := filepath.Abs(outputFile)
+	if err != nil {
+		return fmt.Errorf("invalid output file: %w", err)
 	}
+
+	// Create output directory if needed
+	if err := os.MkdirAll(filepath.Dir(absOutputFile), 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	// Open output file
+	out, err := os.Create(absOutputFile)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer out.Close()
+
+	// Create components
+	w, err := walker.NewDefaultWalker(absInputDir, []string{ignoreFile})
+	if err != nil {
+		return fmt.Errorf("failed to create walker: %w", err)
+	}
+
+	p := core.NewDefaultFileProcessor(preserveWhitespace)
+	f := format.NewMarkdownFormatter()
+
+	// Create digester
+	d := core.NewDigester(w, p, f, core.DigestOptions{
+		RootDir:     absInputDir,
+		IgnoreFiles: []string{ignoreFile},
+		MaxFileSize: 10 * 1024 * 1024, // 10MB
+	})
+
+	// Process with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// Run digest
+	result, err := d.Digest(ctx, out)
+	if err != nil {
+		return fmt.Errorf("digest failed: %w", err)
+	}
+
+	// Print summary
+	cmd.Println("\n📊 Processing Summary")
+	cmd.Println("═══════════════════\n")
+	cmd.Printf("📁 Files processed: %d\n", result.FilesProcessed)
+	cmd.Printf("⏭️  Files skipped: %d\n", result.FilesSkipped)
+	cmd.Printf("💾 Total size: %.2f MB\n", float64(result.TotalSize)/(1024*1024))
+	cmd.Printf("⏱️  Processing time: %.2f seconds\n", result.ProcessingTime)
+	cmd.Printf("📄 Largest file: %s (%.2f MB)\n",
+		result.LargestFile,
+		float64(result.LargestFileSize)/(1024*1024))
+	cmd.Printf("\n✨ Output written to: %s\n", absOutputFile)
 
 	return nil
 }
